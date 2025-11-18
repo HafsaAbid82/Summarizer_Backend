@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+pydantic
+openai
+beautifulsoup4
+requests
+python-dotenv
+huggingface-hub
