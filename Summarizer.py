@@ -67,7 +67,7 @@ def post_data(request_data: SummaryRequest):
     try:
         summarization_result = HF_client.summarization(
             article_text, 
-            model="facebook/bart-large-cnn"
+            model="Falconsai/text_summarization"
         )
         hf_summary = summarization_result[0]['summary_text'] 
     except Exception as e:
