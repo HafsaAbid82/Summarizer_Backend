@@ -1,11 +1,17 @@
 from huggingface_hub import InferenceClient
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import os
 from openai import OpenAI
 from bs4 import BeautifulSoup
 import requests
+from upstash_redis import Redis as RLRedis
+from upstash_redis import Redis
+from upstash_ratelimit import Ratelimit
+import json
+redis = Redis(url=os.environ.get("Redis_URL"), token=os.environ.get("Redis_Token"))
+rate_redis = RLRedis(url=os.environ["Redis_URL"], token=os.environ["Redis_Token"])
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
@@ -19,11 +25,14 @@ app.add_middleware(
 )
 class SummaryRequest(BaseModel): 
     url: str
-Summary = {} 
 HF_TOKEN = os.environ.get("HF_TOKEN")
 OPENAI_KEY = os.environ.get("OPENAI_API_KEY")
 HF_client = None
 client = None
+ratelimit = Ratelimit(
+    redis=rate_redis,
+    limiter=Ratelimit.sliding_window(2, "1 m"),
+)
 try:
     if not HF_TOKEN:
         print("ERROR: HF_TOKEN environment variable is not set. API will fail.")
@@ -44,13 +53,29 @@ def read_root():
     """A simple health check endpoint."""
     return {"message": "FastAPI Summarization Service is running on Vercel."}
 @app.post("/summarization")
-def post_data(request_data: SummaryRequest):
+def post_data(request_data: SummaryRequest, request: Request):
     if not HF_client or not client:
         raise HTTPException(
             status_code=500, 
             detail="Server API keys missing. Ensure HF_TOKEN and OPENAI_API_KEY are set as secrets in Vercel."
         )
     target_url = request_data.url
+    cached = redis.get(target_url)
+    if cached:
+      data = json.loads(cached)
+      return {
+        "status": "Success",
+        "source_url": target_url,
+        "hf_summary": data["hf_summary"],
+        "openai_summary": data["openai_summary"]
+    }
+    user_ip = request.client.host
+    limit = ratelimit.limit(user_ip) 
+    if not limit["allowed"]:
+     raise HTTPException(
+        status_code=429,
+        detail=f"Rate limit exceeded. Try again in {limit['reset']} seconds."
+    )
     try:
         article_response = requests.get(target_url, headers=headers, timeout=15)
     except requests.exceptions.RequestException as e:
@@ -67,7 +92,7 @@ def post_data(request_data: SummaryRequest):
     try:
         summarization_result = HF_client.summarization(
             article_text, 
-            model="Falconsai/text_summarization"
+            model="sshleifer/distilbart-cnn-12-6"
         )
         hf_summary = summarization_result[0]['summary_text'] 
     except Exception as e:
@@ -82,41 +107,41 @@ def post_data(request_data: SummaryRequest):
                 {"role": "user", "content": f"summarize the following article: {article_text}"}
             ],
             max_tokens=50,
+            temperature= 0.1,
         )
         openai_summary = response.choices[0].message.content
     except Exception as e:
         print(f"--- FAILED AT OPENAI CALL ---")
         print(f"OpenAI API Exception Details: {e}")
-        print(f"-----------------------------")
         pass
     if hf_summary == "HF Summary Failed" and openai_summary == "OpenAI Summary Failed":
         raise HTTPException(status_code=500, detail="Both Hugging Face and OpenAI summarization attempts failed.")
-    new_result = {
-        "source_url": target_url,
-        "hf_summary": hf_summary,
-        "openai_summary": openai_summary,
-    }
-    Summary[target_url] = new_result
+    redis.set(target_url, 
+    json.dumps ({
+    "hf_summary": hf_summary,
+    "openai_summary": openai_summary
+    }), 
+    ex=3600 
+)
     return {
-        "status": "Success",
-        "source_url": target_url,
-        "hf_summary": hf_summary,
-        "openai_summary": openai_summary,
-    }
-def check_for_existing_result(url_key: str):
-    return Summary.get(url_key)
+    "status": "Success",
+    "source_url": target_url,
+    "hf_summary": hf_summary,
+    "openai_summary": openai_summary
+}
 @app.get("/summarization/{url_key:path}")
 def get_summary(url_key: str):
-    result = check_for_existing_result(url_key)
-    if result:
+    cached = redis.get(url_key)
+    if cached:
+        data = json.loads(cached)
         return {
             "status": "Success",
-            "source_url": result["source_url"],
-            "hf_summary": result["hf_summary"],
-            "openai_summary": result["openai_summary"],
+            "source_url": url_key,
+            "hf_summary": data["hf_summary"],
+            "openai_summary": data["openai_summary"]
         }
     else:
-        raise HTTPException(status_code=404, detail=f"URL '{url_key}' not found in current session memory.")
+        raise HTTPException(status_code=404, detail=f"URL '{url_key}' not found in session memory.")
           
 
 
