@@ -10,12 +10,26 @@ from upstash_redis import Redis
 from upstash_ratelimit import Ratelimit
 import json
 
-redis = Redis(url=os.environ.get("Redis_URL"), token=os.environ.get("Redis_Token"))
+REDIS_URL = os.environ.get("Redis_URL")
+REDIS_TOKEN = os.environ.get("Redis_Token")
 
+
+redis = None
+ratelimit = None
+
+
+if REDIS_URL and REDIS_TOKEN:
+try:
+redis = Redis(url=REDIS_URL, token=REDIS_TOKEN)
 ratelimit = Ratelimit(
-    redis=redis,
-    limiter=Ratelimit.sliding_window(2, "1 m"),
+redis=redis,
+limiter=Ratelimit.sliding_window(2, "1 m"),
 )
+print("SUCCESS: Redis and Ratelimit initialized.")
+except Exception as e:
+print(f"CRITICAL ERROR: Failed to initialize Redis/Ratelimit: {e}")
+else:
+print("WARNING: Redis_URL or Redis_Token is missing. Caching and RateLimiting will be disabled.")
 
 app = FastAPI()
 app.add_middleware(
