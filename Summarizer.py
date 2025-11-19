@@ -6,43 +6,21 @@ import os
 from openai import OpenAI
 from bs4 import BeautifulSoup
 import requests
-from upstash_redis import Redis
-from upstash_ratelimit import Ratelimit
 import json
+# Removed: from upstash_redis import Redis
+# Removed: from upstash_ratelimit import Ratelimit
 
 # ----------------------------------------------------------------------
-# 1. Environment Variable Checks and DEFERRED Initialization (CRITICAL FIX)
-#    This ensures the app doesn't crash globally if Redis secrets are missing.
+# 1. API Client Initialization
 # ----------------------------------------------------------------------
 
-REDIS_URL = os.environ.get("Redis_URL")
-REDIS_TOKEN = os.environ.get("Redis_Token")
 HF_TOKEN = os.environ.get("HF_TOKEN")
 OPENAI_KEY = os.environ.get("OPENAI_API_KEY")
 
-redis = None
-ratelimit = None
+# Removed: redis = None
+# Removed: ratelimit = None
 HF_client = None
 client = None
-
-if REDIS_URL and REDIS_TOKEN:
-    try:
-        # **Caching and Rate Limiting features are initialized HERE**
-        redis = Redis(url=REDIS_URL, token=REDIS_TOKEN)
-        ratelimit = Ratelimit(
-            redis=redis,
-            limiter=Ratelimit.sliding_window(2, "1 m"),
-        )
-        print("SUCCESS: Redis and Ratelimit initialized and active.")
-    except Exception as e:
-        print(f"CRITICAL ERROR: Failed to initialize Redis/Ratelimit: {e}")
-        # If initialization fails, they remain None.
-else:
-    print("WARNING: Redis_URL or Redis_Token is missing. Caching and RateLimiting will be DISABLED.")
-
-# ----------------------------------------------------------------------
-# 2. API Client Initialization
-# ----------------------------------------------------------------------
 
 try:
     if HF_TOKEN:
@@ -60,7 +38,7 @@ except Exception as e:
     print(f"ERROR initializing API clients: {e}.")    
     
 # ----------------------------------------------------------------------
-# 3. FastAPI Setup
+# 2. FastAPI Setup
 # ----------------------------------------------------------------------
 app = FastAPI()
 app.add_middleware(
@@ -82,11 +60,12 @@ headers = {
 }
 
 # ----------------------------------------------------------------------
-# 4. Endpoints
+# 3. Endpoints
 # ----------------------------------------------------------------------
 @app.get("/")
 def read_root():
     """A simple health check endpoint."""
+    # This minimal endpoint must work if Redis was the issue.
     return {"message": "FastAPI Summarization Service is running on Vercel."}
 
 @app.post("/summarization")
@@ -100,30 +79,8 @@ def post_data(request_data: SummaryRequest, request: Request):
     
     target_url = request_data.url
     
-    # Check 2: Cache Read (FEATURE CHECK: Only runs if Redis was successfully initialized)
-    if redis:
-        cached = redis.get(target_url)
-        if cached:
-            if isinstance(cached, bytes):
-                cached = cached.decode('utf-8')
-            data = json.loads(cached)
-            return {
-                "status": "Success",
-                "source_url": target_url,
-                "hf_summary": data.get("hf_summary"),
-                "openai_summary": data.get("openai_summary")
-            }
-        
-    # Check 3: Rate Limit (FEATURE CHECK: Only runs if Ratelimit was successfully initialized)
-    if ratelimit:
-        user_ip = request.headers.get("x-forwarded-for", request.client.host)
-        limit = ratelimit.limit(user_ip) 
-        
-        if not limit["allowed"]:
-            raise HTTPException(
-                status_code=429,
-                detail=f"Rate limit exceeded. Try again in {limit['reset']} seconds."
-            )
+    # Removed: Cache Read Logic
+    # Removed: Rate Limit Logic
         
     # --- Web Scraping and Summarization Logic (unchanged) ---
     try:
@@ -173,16 +130,7 @@ def post_data(request_data: SummaryRequest, request: Request):
     if hf_summary == "HF Summary Failed" and openai_summary == "OpenAI Summary Failed":
         raise HTTPException(status_code=500, detail="Both Hugging Face and OpenAI summarization attempts failed.")
         
-    # Check 4: Cache Write (FEATURE CHECK: Only runs if Redis was successfully initialized)
-    if redis:
-        redis.set(
-            target_url, 
-            json.dumps ({
-                "hf_summary": hf_summary,
-                "openai_summary": openai_summary
-            }), 
-            ex=3600 
-        )
+    # Removed: Cache Write Logic (if redis:)
         
     return {
         "status": "Success",
@@ -193,18 +141,6 @@ def post_data(request_data: SummaryRequest, request: Request):
 
 @app.get("/summarization/{url_key:path}")
 def get_summary(url_key: str):
-    # Check 5: Cache Read for GET (FEATURE CHECK: Only runs if Redis was successfully initialized)
-    if redis:
-        cached = redis.get(url_key)
-        if cached:
-            if isinstance(cached, bytes):
-                cached = cached.decode('utf-8')
-            data = json.loads(cached)
-            return {
-                "status": "Success",
-                "source_url": url_key,
-                "hf_summary": data.get("hf_summary"),
-                "openai_summary": data.get("openai_summary")
-            }
-        
+    # Removed: Cache Read Logic (if redis:)
+    raise HTTPException(status_code=404, detail=f"URL '{url_key}' not found in session memory.")
     raise HTTPException(status_code=404, detail=f"URL '{url_key}' not found in session memory.")
