@@ -103,10 +103,10 @@ def post_data(request_data: SummaryRequest, request: Request):
         raise HTTPException(status_code=400, detail="Error extracting sufficient article text from the URL.")
     words = article_text.split()
     truncated_text = " ".join(words[:500])
-    hf_summary = "HF Summary Failed"
+    hf_summary = " "
     hf_error_detail = ""
     try:
-        summarization_result = HF_client.post(
+        summarization_result = HF_client.create(
             truncated_text, 
             model="facebook/bart-large-cnn"
         )
