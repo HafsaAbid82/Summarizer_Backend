@@ -106,8 +106,8 @@ def post_data(request_data: SummaryRequest, request: Request):
     hf_summary = " "
     hf_error_detail = ""
     try:
-        summarization_result = HF_client.create(
-            truncated_text, 
+        summarization_result = HF_client.summarization(
+            "Summarize this text: " + truncated_text, 
             model="facebook/bart-large-cnn"
         )
         hf_summary = summarization_result[0]['summary_text'] 
