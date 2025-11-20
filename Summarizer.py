@@ -15,7 +15,6 @@ HF_client = InferenceClient(token=os.environ["HF_TOKEN"])
 OPENAI_KEY = os.environ.get("OPENAI_API_KEY")
 redis = None
 ratelimit = None
-HF_client = None
 client = None
 if REDIS_URL and REDIS_TOKEN:
     try:
@@ -106,7 +105,7 @@ def post_data(request_data: SummaryRequest, request: Request):
             truncated_text, 
             model="facebook/bart-large-cnn"
         )
-        hf_summary = summarization_result[0]['summary_text'] 
+        hf_summary = summarization_result['summary_text'] 
     except Exception as e:
         hf_error_detail = str(e) 
         print(f"Hugging Face API Error: {e}")
