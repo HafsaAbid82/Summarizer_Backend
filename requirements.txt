@@ -1,13 +1,9 @@
 fastapi
 uvicorn
 pydantic
-python-dotenv
-httpx
+requests
 beautifulsoup4
-openai>=1.0.0
+openai
 huggingface_hub
-transformers
-torch
 upstash-redis
 upstash-ratelimit
-asyncio
