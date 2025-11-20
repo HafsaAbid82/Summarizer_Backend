@@ -1,9 +1,8 @@
 fastapi
 uvicorn
 pydantic
-openai
+httpx
 beautifulsoup4
-requests
-huggingface-hub
+huggingface_hub
+openai
 upstash-redis
-upstash-ratelimit
