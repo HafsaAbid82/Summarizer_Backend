@@ -13,12 +13,10 @@ REDIS_URL = os.environ.get("Redis_URL")
 REDIS_TOKEN = os.environ.get("Redis_Token")
 HF_TOKEN = os.environ.get("HF_TOKEN")
 OPENAI_KEY = os.environ.get("OPENAI_API_KEY")
-
 redis = None
 ratelimit = None
 HF_client = None
 client = None
-
 if REDIS_URL and REDIS_TOKEN:
     try:
         redis = Redis(url=REDIS_URL, token=REDIS_TOKEN)
@@ -41,7 +39,6 @@ try:
         client = OpenAI(api_key=OPENAI_KEY) 
     else:
         print("ERROR: OPENAI_API_KEY environment variable is not set.")
-
     print("SUCCESS: Attempted API client initialization.")
 except Exception as e:
     print(f"ERROR initializing API clients: {e}.")    
@@ -56,10 +53,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
 class SummaryRequest(BaseModel): 
-    url: str
-    
+    url: str   
 headers = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
 }
@@ -67,7 +62,6 @@ headers = {
 def read_root():
     """A simple health check endpoint."""
     return {"message": "FastAPI Summarization Service is running on Vercel."}
-
 @app.post("/summarization")
 def post_data(request_data: SummaryRequest, request: Request):
     if not HF_client or not client:
@@ -75,7 +69,6 @@ def post_data(request_data: SummaryRequest, request: Request):
             status_code=500, 
             detail="Server API keys missing. Ensure HF_TOKEN and OPENAI_API_KEY are set as secrets in Vercel."
         )
-    
     target_url = request_data.url
     cached = None
     if redis:
@@ -93,7 +86,6 @@ def post_data(request_data: SummaryRequest, request: Request):
     if ratelimit:
         user_ip = request.headers.get("x-forwarded-for", request.client.host)
         limit = ratelimit.limit(user_ip) 
-        
         if not limit["allowed"]:
             raise HTTPException(
                 status_code=429,
@@ -103,15 +95,12 @@ def post_data(request_data: SummaryRequest, request: Request):
         article_response = requests.get(target_url, headers=headers, timeout=15)
     except requests.exceptions.RequestException as e:
         raise HTTPException(status_code=500, detail=f"Web request failed: {e}")
-        
     if article_response.status_code != 200:
         if article_response.status_code in (401, 403):
             raise HTTPException(status_code=401, detail="Access denied to the article URL (401/403).")
         raise HTTPException(status_code=article_response.status_code, detail=f"Failed to fetch article. Status code: {article_response.status_code}")
-        
     soup = BeautifulSoup(article_response.text, "html.parser")
     article_text = soup.find('body').get_text(separator=' ', strip=True) 
-    
     if not article_text.strip() or len(article_text) < 50:
         raise HTTPException(status_code=400, detail="Error extracting sufficient article text from the URL.")
     words = article_text.split()
@@ -122,11 +111,10 @@ def post_data(request_data: SummaryRequest, request: Request):
             truncated_text, 
             model="sshleifer/distilbart-cnn-12-6"
         )
-        hf_summary = summarization_result[0]['summary_text'] 
+        hf_summary = summarization_result['summary_text'] 
     except Exception as e:
         print(f"Hugging Face API Error: {e}")
         pass
-        
     openai_summary = "OpenAI Summary Failed"
     try:
         response = client.chat.completions.create(
