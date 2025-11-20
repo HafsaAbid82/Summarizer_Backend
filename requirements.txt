@@ -4,6 +4,9 @@ pydantic
 requests
 beautifulsoup4
 openai
+transformers
+torch
+sentence-transformers
 huggingface_hub
 upstash-redis
 upstash-ratelimit
