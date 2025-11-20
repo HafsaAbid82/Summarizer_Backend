@@ -104,9 +104,9 @@ def post_data(request_data: SummaryRequest, request: Request):
     words = article_text.split()
     truncated_text = " ".join(words[:500])
     hf_summary = "HF Summary Failed"
-    hf_error_detail = str(e)
+    hf_error_detail = ""
     try:
-        summarization_result = HF_client.summarization(
+        summarization_result = HF_client.post(
             truncated_text, 
             model="facebook/bart-large-cnn"
         )
