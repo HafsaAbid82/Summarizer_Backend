@@ -22,7 +22,7 @@ if REDIS_URL and REDIS_TOKEN:
         redis = Redis(url=REDIS_URL, token=REDIS_TOKEN)
         ratelimit = Ratelimit(
             redis=redis,
-            limiter=Ratelimit.sliding_window(2, "1 m"),
+            limiter=Ratelimit.sliding_window(4, "1 m"),
         )
         print("SUCCESS: Redis and Ratelimit initialized and active.")
     except Exception as e:
