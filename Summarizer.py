@@ -1,49 +1,78 @@
-from huggingface_hub import InferenceClient
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, HttpUrl
+from typing import Optional
 import os
-from openai import OpenAI
-from bs4 import BeautifulSoup
-import requests
 import json
+import asyncio
+from contextlib import asynccontextmanager
+
+# Third-party imports
+from huggingface_hub import AsyncInferenceClient
+from openai import AsyncOpenAI
 from upstash_redis import Redis
 from upstash_ratelimit import Ratelimit
+from bs4 import BeautifulSoup
+import httpx
+
+# --- Configuration ---
 REDIS_URL = os.environ.get("Redis_URL")
 REDIS_TOKEN = os.environ.get("Redis_Token")
 HF_TOKEN = os.environ.get("HF_TOKEN")
 OPENAI_KEY = os.environ.get("OPENAI_API_KEY")
-redis = None
-ratelimit = None
-HF_client = None
-client = None
-if REDIS_URL and REDIS_TOKEN:
-    try:
-        redis = Redis(url=REDIS_URL, token=REDIS_TOKEN)
-        ratelimit = Ratelimit(
-            redis=redis,
-            limiter=Ratelimit.sliding_window(4, "1 m"),
-        )
-        print("SUCCESS: Redis and Ratelimit initialized and active.")
-    except Exception as e:
-        print(f"CRITICAL ERROR: Failed to initialize Redis/Ratelimit: {e}")
-        # If initialization fails, they remain None.
-else:
-    print("WARNING: Redis_URL or Redis_Token is missing. Caching and RateLimiting will be DISABLED.")
-try:
-    if HF_TOKEN:
-        HF_client = InferenceClient(provider="auto", token=HF_TOKEN, timeout=120.0) 
-    else:
-        print("ERROR: HF_TOKEN environment variable is not set.")
-    if OPENAI_KEY:
-        client = OpenAI(api_key=OPENAI_KEY) 
-    else:
-        print("ERROR: OPENAI_API_KEY environment variable is not set.")
 
-    print("SUCCESS: Attempted API client initialization.")
-except Exception as e:
-    print(f"ERROR initializing API clients: {e}.")    
-app = FastAPI()
+# --- Global Clients ---
+# We use a lifespan manager to handle resources efficiently
+redis_client: Optional[Redis] = None
+ratelimit: Optional[Ratelimit] = None
+hf_client: Optional[AsyncInferenceClient] = None
+openai_client: Optional[AsyncOpenAI] = None
+http_client: Optional[httpx.AsyncClient] = None
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """
+    Initialize clients on startup and clean them up on shutdown.
+    """
+    global redis_client, ratelimit, hf_client, openai_client, http_client
+    
+    # 1. Initialize Redis
+    if REDIS_URL and REDIS_TOKEN:
+        try:
+            # Upstash Python SDK is HTTP-based and sync by default, 
+            # but fast enough for this use case. 
+            redis_client = Redis(url=REDIS_URL, token=REDIS_TOKEN)
+            ratelimit = Ratelimit(
+                redis=redis_client,
+                limiter=Ratelimit.sliding_window(4, "1 m"),
+            )
+            print("SUCCESS: Redis and Ratelimit initialized.")
+        except Exception as e:
+            print(f"WARNING: Redis init failed: {e}")
+    
+    # 2. Initialize AI Clients
+    if HF_TOKEN:
+        hf_client = AsyncInferenceClient(token=HF_TOKEN)
+    
+    if OPENAI_KEY:
+        openai_client = AsyncOpenAI(api_key=OPENAI_KEY)
+
+    # 3. Shared HTTP Client for Scraping (Prevent opening new connection per request)
+    http_client = httpx.AsyncClient(
+        headers={"User-Agent": "Mozilla/5.0 (SummarizerBot/1.0)"},
+        timeout=15.0,
+        follow_redirects=True
+    )
+
+    yield # App runs here
+
+    # Cleanup
+    await http_client.aclose()
+    print("Shutdown: Resources released.")
+
+app = FastAPI(lifespan=lifespan)
+
+# --- Middleware ---
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -54,127 +83,166 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-class SummaryRequest(BaseModel): 
-    url: str
-    
-headers = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-}
+
+# --- Models ---
+class SummaryRequest(BaseModel):
+    url: HttpUrl # Validates that input is actually a URL
+
+# --- Helper Functions ---
+async def fetch_and_clean_article(url: str) -> str:
+    """
+    Async fetching and smarter cleaning of HTML.
+    """
+    try:
+        response = await http_client.get(url)
+        response.raise_for_status()
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code in (401, 403):
+            raise HTTPException(status_code=403, detail="Access denied to article (401/403).")
+        raise HTTPException(status_code=e.response.status_code, detail="Failed to fetch article.")
+    except httpx.RequestError as e:
+        raise HTTPException(status_code=500, detail=f"Network error: {e}")
+
+    soup = BeautifulSoup(response.text, "html.parser")
+
+    # Remove unwanted elements (nav, footer, scripts, styles)
+    for element in soup(["script", "style", "nav", "footer", "header", "aside", "noscript"]):
+        element.decompose()
+
+    # Extract text primarily from Paragraphs to avoid menu items
+    paragraphs = [p.get_text().strip() for p in soup.find_all('p') if len(p.get_text().strip()) > 20]
+    article_text = " ".join(paragraphs)
+
+    if not article_text or len(article_text) < 50:
+        # Fallback to body if p tags fail
+        article_text = soup.body.get_text(separator=' ', strip=True)
+
+    if len(article_text) < 50:
+        raise HTTPException(status_code=400, detail="Could not extract sufficient text content.")
+
+    # Limit to ~600 words for inputs
+    return " ".join(article_text.split()[:600])
+
+# --- Routes ---
 @app.get("/")
 def read_root():
-    """A simple health check endpoint."""
-    return {"message": "FastAPI Summarization Service is running on Vercel."}
+    return {"message": "FastAPI Summarization Service is running."}
 
 @app.post("/summarization")
-def post_data(request_data: SummaryRequest, request: Request):
-    if not HF_client or not client:
-        raise HTTPException(
-            status_code=500, 
-            detail="Server API clients failed to initialize. Check HF_TOKEN and OPENAI_API_KEY setup."
-        )
-    target_url = request_data.url
-    cached = None
-    if redis:
-        cached = redis.get(target_url)
-        if cached:
-            if isinstance(cached, bytes):
-                cached = cached.decode('utf-8')
-            data = json.loads(cached)
-            return {
-                "status": "Success",
-                "source_url": target_url,
-                "hf_summary": data.get("hf_summary"),
-                "openai_summary": data.get("openai_summary")
-            }
+async def post_data(request_data: SummaryRequest, request: Request):
+    url_str = str(request_data.url)
+
+    # 1. Rate Limiting
     if ratelimit:
-        # Use X-Forwarded-For to get the user's real IP behind Vercel's proxy
         user_ip = request.headers.get("x-forwarded-for", request.client.host)
-        limit = ratelimit.limit(user_ip)      
+        # Note: Upstash rate limit is sync, but lightweight
+        limit = ratelimit.limit(user_ip)
         if not limit["allowed"]:
             raise HTTPException(
-                status_code=429,
-                detail=f"Rate limit exceeded. Try again in {limit['reset']} seconds."
+                status_code=429, 
+                detail=f"Rate limit exceeded. Reset in {limit['reset']}s"
             )
-    try:
-        article_response = requests.get(target_url, headers=headers, timeout=15)
-    except requests.exceptions.RequestException as e:
-        raise HTTPException(status_code=500, detail=f"Web request failed: {e}")
-    if article_response.status_code != 200:
-        if article_response.status_code in (401, 403):
-            raise HTTPException(status_code=401, detail="Access denied to the article URL (401/403).")
-        raise HTTPException(status_code=article_response.status_code, detail=f"Failed to fetch article. Status code: {article_response.status_code}")
-    soup = BeautifulSoup(article_response.text, "html.parser")
-    article_text = soup.find('body').get_text(separator=' ', strip=True) 
-    if not article_text.strip() or len(article_text) < 50:
-        raise HTTPException(status_code=400, detail="Error extracting sufficient article text from the URL.")
-    words = article_text.split()
-    truncated_text = " ".join(words[:500])
+
+    # 2. Cache Check
+    if redis_client:
+        try:
+            cached = redis_client.get(url_str)
+            if cached:
+                data = json.loads(cached)
+                return {
+                    "status": "Success (Cached)",
+                    "source_url": url_str,
+                    "hf_summary": data.get("hf_summary"),
+                    "openai_summary": data.get("openai_summary")
+                }
+        except Exception:
+            pass # Fail silently on cache read error
+
+    # 3. Scrape Article (Async)
+    truncated_text = await fetch_and_clean_article(url_str)
+
+    # 4. Perform Summarization (Parallel Execution optional, currently sequential for safety)
+    
+    # -- Hugging Face --
     hf_summary = "HF Summary Failed"
-    hf_error_detail = str(e)
-    try:
-        summarization_result = HF_client.summarization(
-            truncated_text, 
-            model="facebook/bart-large-cnn"
-        )
-        hf_summary = summarization_result[0]['summary_text'] 
-    except Exception as e:
-        hf_error_detail = str(e) 
-        print(f"Hugging Face API Error: {e}")
-        pass
+    hf_error = None
+    if hf_client:
+        try:
+            # Using facebook/bart-large-cnn
+            result = await hf_client.summarization(
+                truncated_text, 
+                model="facebook/bart-large-cnn",
+                parameters={"truncation": "only_first"}
+            )
+            # AsyncInferenceClient might return a list or object depending on version
+            hf_summary = result.summary_text if hasattr(result, 'summary_text') else result[0]['summary_text']
+        except Exception as e:
+            hf_error = str(e)
+            print(f"HF Error: {e}")
+
+    # -- OpenAI --
     openai_summary = "OpenAI Summary Failed"
-    openai_error_detail = ""
-    try:
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": "You are a concise summarization assistant. Provide a brief summary, no more than three sentences long."},
-                {"role": "user", "content": f"summarize the following article: {truncated_text}"}
-            ],
-            max_tokens=50,
-            temperature=0.1,
-        )
-        openai_summary = response.choices[0].message.content
-    except Exception as e:
-        openai_error_detail = str(e) # Capture the specific error
-        print(f"--- FAILED AT OPENAI CALL ---")
-        print(f"OpenAI API Exception Details: {e}")
-        pass  
+    openai_error = None
+    if openai_client:
+        try:
+            response = await openai_client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": "You are a concise summarization assistant. Keep it under 3 sentences."},
+                    {"role": "user", "content": f"Summarize this: {truncated_text}"}
+                ],
+                max_tokens=100,
+                temperature=0.1,
+            )
+            openai_summary = response.choices[0].message.content
+        except Exception as e:
+            openai_error = str(e)
+            print(f"OpenAI Error: {e}")
+
+    # 5. Error Handling
     if hf_summary == "HF Summary Failed" and openai_summary == "OpenAI Summary Failed":
-        error_detail = "Both Hugging Face and OpenAI summarization attempts failed."
-        if hf_error_detail:
-            error_detail += f" HF Error: {hf_error_detail}."
-        if openai_error_detail:
-            error_detail += f" OpenAI Error: {openai_error_detail}."          
-        raise HTTPException(status_code=500, detail=error_detail)
-    if redis:
-        redis.set(
-            target_url, 
-            json.dumps ({
-                "hf_summary": hf_summary,
-                "openai_summary": openai_summary
-            }), 
-            ex=3600 
-        )      
+        detail_msg = "Both providers failed."
+        if hf_error: detail_msg += f" HF: {hf_error}."
+        if openai_error: detail_msg += f" OpenAI: {openai_error}."
+        raise HTTPException(status_code=500, detail=detail_msg)
+
+    # 6. Cache Result
+    if redis_client:
+        try:
+            redis_client.set(
+                url_str,
+                json.dumps({
+                    "hf_summary": hf_summary,
+                    "openai_summary": openai_summary
+                }),
+                ex=3600
+            )
+        except Exception as e:
+            print(f"Cache write failed: {e}")
+
     return {
         "status": "Success",
-        "source_url": target_url,
+        "source_url": url_str,
         "hf_summary": hf_summary,
         "openai_summary": openai_summary
     }
+
 @app.get("/summarization/{url_key:path}")
 def get_summary(url_key: str):
-    # Check 5: Cache Read for GET (FEATURE CHECK: Only runs if Redis was successfully initialized)
-    if redis:
-        cached = redis.get(url_key)
-        if cached:
-            if isinstance(cached, bytes):
-                cached = cached.decode('utf-8')
-            data = json.loads(cached)
-            return {
-                "status": "Success",
-                "source_url": url_key,
-                "hf_summary": data.get("hf_summary"),
-                "openai_summary": data.get("openai_summary")
-            }
-        
-    raise HTTPException(status_code=404, detail=f"URL '{url_key}' not found in session memory.")
+    """
+    Retrieve a specific URL summary from cache explicitly.
+    """
+    if not redis_client:
+         raise HTTPException(status_code=503, detail="Cache service unavailable.")
+         
+    cached = redis_client.get(url_key)
+    if cached:
+        data = json.loads(cached)
+        return {
+            "status": "Success",
+            "source_url": url_key,
+            "hf_summary": data.get("hf_summary"),
+            "openai_summary": data.get("openai_summary")
+        }
+    
+    raise HTTPException(status_code=404, detail="URL not found in cache.")
