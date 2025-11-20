@@ -4,7 +4,7 @@ pydantic
 requests
 beautifulsoup4
 openai
-torch
+python-dotenv
 huggingface_hub
 upstash-redis
 upstash-ratelimit
