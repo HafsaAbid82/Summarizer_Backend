@@ -11,7 +11,7 @@ from upstash_redis import Redis
 from upstash_ratelimit import Ratelimit
 REDIS_URL = os.environ.get("Redis_URL")
 REDIS_TOKEN = os.environ.get("Redis_Token")
-HF_TOKEN = ("HF_TOKEN")
+HF_TOKEN = os.environ.get("HF_TOKEN")
 OPENAI_KEY = os.environ.get("OPENAI_API_KEY")
 redis = None
 ratelimit = None
@@ -32,7 +32,7 @@ else:
     print("WARNING: Redis_URL or Redis_Token is missing. Caching and RateLimiting will be DISABLED.")
 try:
     if HF_TOKEN:
-        HF_client = InferenceClient(provider="auto", token=HF_TOKEN, timeout=180.0) 
+        HF_client = InferenceClient(provider="auto", token=HF_TOKEN, timeout=120.0) 
     else:
         print("ERROR: HF_TOKEN environment variable is not set.")
     if OPENAI_KEY:
@@ -110,7 +110,7 @@ def post_data(request_data: SummaryRequest, request: Request):
     words = article_text.split()
     truncated_text = " ".join(words[:500])
     hf_summary = "HF Summary Failed"
-    hf_error_detail = ""
+    hf_error_detail = str(e)
     try:
         summarization_result = HF_client.summarization(
             truncated_text, 
