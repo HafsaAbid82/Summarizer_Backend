@@ -7,21 +7,10 @@ from openai import OpenAI
 from bs4 import BeautifulSoup
 import requests
 import json
-# Removed: from upstash_redis import Redis
-# Removed: from upstash_ratelimit import Ratelimit
-
-# ----------------------------------------------------------------------
-# 1. API Client Initialization
-# ----------------------------------------------------------------------
-
 HF_TOKEN = os.environ.get("HF_TOKEN")
 OPENAI_KEY = os.environ.get("OPENAI_API_KEY")
-
-# Removed: redis = None
-# Removed: ratelimit = None
 HF_client = None
 client = None
-
 try:
     if HF_TOKEN:
         HF_client = InferenceClient(token=HF_TOKEN, timeout=120.0) 
@@ -36,10 +25,6 @@ try:
     print("SUCCESS: Attempted API client initialization.")
 except Exception as e:
     print(f"ERROR initializing API clients: {e}.")    
-    
-# ----------------------------------------------------------------------
-# 2. FastAPI Setup
-# ----------------------------------------------------------------------
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
@@ -58,10 +43,6 @@ class SummaryRequest(BaseModel):
 headers = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
 }
-
-# ----------------------------------------------------------------------
-# 3. Endpoints
-# ----------------------------------------------------------------------
 @app.get("/")
 def read_root():
     """A simple health check endpoint."""
@@ -78,11 +59,6 @@ def post_data(request_data: SummaryRequest, request: Request):
         )
     
     target_url = request_data.url
-    
-    # Removed: Cache Read Logic
-    # Removed: Rate Limit Logic
-        
-    # --- Web Scraping and Summarization Logic (unchanged) ---
     try:
         article_response = requests.get(target_url, headers=headers, timeout=15)
     except requests.exceptions.RequestException as e:
@@ -103,13 +79,12 @@ def post_data(request_data: SummaryRequest, request: Request):
     try:
         summarization_result = HF_client.summarization(
             article_text, 
-            model="sshleifer/distilbart-cnn-12-6"
+            model="facebook/bart-large-cnn"
         )
         hf_summary = summarization_result[0]['summary_text'] 
     except Exception as e:
         print(f"Hugging Face API Error: {e}")
         pass
-        
     openai_summary = "OpenAI Summary Failed"
     try:
         response = client.chat.completions.create(
@@ -126,11 +101,8 @@ def post_data(request_data: SummaryRequest, request: Request):
         print(f"--- FAILED AT OPENAI CALL ---")
         print(f"OpenAI API Exception Details: {e}")
         pass
-        
     if hf_summary == "HF Summary Failed" and openai_summary == "OpenAI Summary Failed":
         raise HTTPException(status_code=500, detail="Both Hugging Face and OpenAI summarization attempts failed.")
-        
-    # Removed: Cache Write Logic (if redis:)
         
     return {
         "status": "Success",
@@ -141,6 +113,5 @@ def post_data(request_data: SummaryRequest, request: Request):
 
 @app.get("/summarization/{url_key:path}")
 def get_summary(url_key: str):
-    # Removed: Cache Read Logic (if redis:)
     raise HTTPException(status_code=404, detail=f"URL '{url_key}' not found in session memory.")
     raise HTTPException(status_code=404, detail=f"URL '{url_key}' not found in session memory.")
