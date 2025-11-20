@@ -99,6 +99,7 @@ def post_data(request_data: SummaryRequest, request: Request):
     words = article_text.split()
     truncated_text = " ".join(words[:500])
     hf_error_detail = ""
+    hf_summary= ""
     try:
         summarization_result = HF_client.summarization(
             truncated_text, 
